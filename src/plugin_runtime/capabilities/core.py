@@ -208,6 +208,24 @@ def _normalize_context_segments(raw_segments: Any) -> List[Dict[str, Any]]:
     return segments
 
 
+def _build_plugin_reply_message(reply_message_id: str, stream_id: str) -> Any:
+    """为插件引用回复构造一个最小 MaiMessage 对象（仅含引用所需 message_id）。
+
+    引用组件（ReplyComponent）序列化时只需要 target_message_id（即 QQ 平台消息 id），
+    因此这里构造一个精简对象让 send_service 的 set_reply 路径能够通过校验并生成引用。
+    """
+    from src.common.data_models.mai_message_data_model import MaiMessage, MessageInfo, UserInfo
+    from src.common.data_models.message_component_data_model import MessageSequence
+
+    reply = MaiMessage(message_id=reply_message_id, timestamp=datetime.now(), platform="qq")
+    reply.session_id = stream_id
+    reply.message_info = MessageInfo(user_info=UserInfo(user_id="", user_nickname=""))
+    reply.raw_message = MessageSequence(components=[])
+    reply.processed_plain_text = ""
+    reply.initialized = True
+    return reply
+
+
 class RuntimeCoreCapabilityMixin:
     """插件运行时的核心能力混入。"""
 
@@ -358,12 +376,27 @@ class RuntimeCoreCapabilityMixin:
         if not text or not stream_id:
             return self._build_send_result(args, error="缺少必要参数 text 或 stream_id")
 
+        set_reply = bool(args.get("set_reply", False))
+        reply_message = None
+        if set_reply:
+            reply_message_id = str(args.get("reply_message_id") or "").strip()
+            if not reply_message_id:
+                # 兼容旧传法：reply_message 传入消息对象/dict，取其 message_id
+                reply_source = args.get("reply_message")
+                if isinstance(reply_source, dict):
+                    reply_message_id = str(reply_source.get("message_id") or "").strip()
+                elif hasattr(reply_source, "message_id"):
+                    reply_message_id = str(getattr(reply_source, "message_id") or "").strip()
+            if reply_message_id:
+                reply_message = _build_plugin_reply_message(reply_message_id, stream_id)
+
         try:
             sent_message = await send_api.text_to_stream_with_message(
                 text=text,
                 stream_id=stream_id,
                 typing=bool(args.get("typing", False)),
-                set_reply=bool(args.get("set_reply", False)),
+                set_reply=set_reply,
+                reply_message=reply_message,
                 storage_message=bool(args.get("storage_message", True)),
                 sync_to_maisaka_history=sync_to_maisaka_history,
                 maisaka_source_kind=maisaka_source_kind,
